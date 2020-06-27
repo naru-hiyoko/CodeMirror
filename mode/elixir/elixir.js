@@ -2,221 +2,299 @@
 // Distributed under an MIT license: https://codemirror.net/LICENSE
 
 (function(mod) {
-  if (typeof exports == "object" && typeof module == "object")
-    mod(require("../../lib/codemirror"))
-  else if (typeof define == "function" && define.amd)
-    define(["../../lib/codemirror"], mod)
-  else
-    mod(CodeMirror)
+  if (typeof exports == "object" && typeof module == "object") // CommonJS
+    mod(require("../../lib/codemirror"));
+  else if (typeof define == "function" && define.amd) // AMD
+    define(["../../lib/codemirror"], mod);
+  else // Plain browser env
+    mod(CodeMirror);
 })(function(CodeMirror) {
-  "use strict"
+"use strict";
 
-  function wordSet(words) {
-    var set = {}
-    for (var i = 0; i < words.length; i++) set[words[i]] = true
-    return set
+CodeMirror.defineMode("elixir", function(config) {
+  function wordObj(words) {
+    var o = {};
+    for (var i = 0, e = words.length; i < e; ++i) o[words[i]] = true;
+    return o;
   }
-
-  var keywords = wordSet([
+  var keywords = wordObj([
+    "alias", "and", , "case", "cond", "def", "defined?", "do", "else",
+    "end", "false", "for", "if", "in", "module", "next", "not", "or",
+    "rescue", "retry", "return", "self", "super", "then", "true", "undef", "unless",
+    "until", "when", "while", "nil", "raise", "throw", "catch", "fail",
+    "require",
+    "__MODULE__", "__struct__",
     "defmodule", "defstruct",
-    "def", "defun", "defunp", "defunpt",
-    "do", "else", "end",
-    "alias", "import", "require",
-  ])
+    "defun", "defunp", "defunpt",
+  ]);
+  var indentWords = wordObj(["defmodule", "defstruct",
+                             "def", "defp", "defun", "defunp", "defunpt"]);
+  var dedentWords = wordObj(["end"]);
+  var opening = {"[": "]", "{": "}", "(": ")"};
+  var closing = {"]": "[", "}": "{", ")": "("};
+  var curPunc;
 
-  var definingKeywords = wordSet([])
-
-  var atoms = wordSet(["true","false","nil","super","_"])
-  var types = wordSet(["integer", "boolean", "String"])
-
-  var operators = "+-/*%=|&<>~^?!"
-  var punc = ":;,.()[]"
-  var binary = /^\-?0b[01][01_]*/
-  var octal = /^\-?0o[0-7][0-7_]*/
-  var hexadecimal = /^\-?0x[\dA-Fa-f][\dA-Fa-f_]*(?:(?:\.[\dA-Fa-f][\dA-Fa-f_]*)?[Pp]\-?\d[\d_]*)?/
-  var decimal = /^\-?\d[\d_]*(?:\.\d[\d_]*)?(?:[Ee]\-?\d[\d_]*)?/
-  var identifier = /^\$\d+|(`?)[_A-Za-z][_A-Za-z$0-9]*\1/
-  var property = /^\.(?:\$\d+|(`?)[_A-Za-z][_A-Za-z$0-9]*\1)/
-  var instruction = /^\#[A-Za-z]+/
-  var attribute = /^@(?:\$\d+|(`?)[_A-Za-z][_A-Za-z$0-9]*\1)/
-  //var regexp = /^\/(?!\s)(?:\/\/)?(?:\\.|[^\/])+\//
-
-  function tokenBase(stream, state, prev) {
-    if (stream.sol()) state.indented = stream.indentation()
-    if (stream.eatSpace()) return null
-
-    var ch = stream.peek()
-    if (ch == "/") {
-      if (stream.match("//")) {
-        stream.skipToEnd()
-        return "comment"
-      }
-      if (stream.match("/*")) {
-        state.tokenize.push(tokenComment)
-        return tokenComment(stream, state)
-      }
-    }
-    if (stream.match(instruction)) return "builtin"
-    if (stream.match(attribute)) return "attribute"
-    if (stream.match(binary)) return "number"
-    if (stream.match(octal)) return "number"
-    if (stream.match(hexadecimal)) return "number"
-    if (stream.match(decimal)) return "number"
-    if (stream.match(property)) return "property"
-    if (operators.indexOf(ch) > -1) {
-      stream.next()
-      return "operator"
-    }
-    if (punc.indexOf(ch) > -1) {
-      stream.next()
-      stream.match("..")
-      return "punctuation"
-    }
-    var stringMatch
-    if (stringMatch = stream.match(/("""|"|')/)) {
-      var tokenize = tokenString.bind(null, stringMatch[0])
-      state.tokenize.push(tokenize)
-      return tokenize(stream, state)
-    }
-
-    if (stream.match(identifier)) {
-      var ident = stream.current()
-      if (types.hasOwnProperty(ident)) return "variable-2"
-      if (atoms.hasOwnProperty(ident)) return "atom"
-      if (keywords.hasOwnProperty(ident)) {
-        if (definingKeywords.hasOwnProperty(ident))
-          state.prev = "define"
-        return "keyword"
-      }
-      if (prev == "define") return "def"
-      return "variable"
-    }
-
-    stream.next()
-    return null
+  function chain(newtok, stream, state) {
+    state.tokenize.push(newtok);
+    return newtok(stream, state);
   }
 
-  function tokenUntilClosingParen() {
-    var depth = 0
-    return function(stream, state, prev) {
-      var inner = tokenBase(stream, state, prev)
-      if (inner == "punctuation") {
-        if (stream.current() == "(") ++depth
-        else if (stream.current() == ")") {
-          if (depth == 0) {
-            stream.backUp(1)
-            state.tokenize.pop()
-            return state.tokenize[state.tokenize.length - 1](stream, state)
-          }
-          else --depth
-        }
-      }
-      return inner
+  function tokenBase(stream, state) {
+    if (stream.sol() && stream.match("=begin") && stream.eol()) {
+      state.tokenize.push(readBlockComment);
+      return "comment";
     }
-  }
+    if (stream.eatSpace()) return null;
+    var ch = stream.next(), m;
+    if (ch == "`" || ch == "'" || ch == '"') {
+      return chain(readQuoted(ch, "string", ch == '"' || ch == "`"), stream, state);
+    } else if (ch == "/") {
+      if (regexpAhead(stream))
+        return chain(readQuoted(ch, "string-2", true), stream, state);
+      else
+        return "operator";
+    } else if (ch == "%") {
+      var style = "string", embed = true;
+      if (stream.eat("s")) style = "atom";
+      else if (stream.eat(/[WQ]/)) style = "string";
+      else if (stream.eat(/[r]/)) style = "string-2";
+      else if (stream.eat(/[wxq]/)) { style = "string"; embed = false; }
+      var delim = stream.eat(/[^\w\s=]/);
+      if (!delim) return "operator";
+      if (opening.propertyIsEnumerable(delim)) delim = opening[delim];
+      return chain(readQuoted(delim, style, embed, true), stream, state);
+    } else if (ch == "#") {
+      stream.skipToEnd();
+      return "comment";
+    } else if (ch == "<" && (m = stream.match(/^<([-~])[\`\"\']?([a-zA-Z_?]\w*)[\`\"\']?(?:;|$)/))) {
+      return chain(readHereDoc(m[2], m[1]), stream, state);
+    } else if (ch == "0") {
+      if (stream.eat("x")) stream.eatWhile(/[\da-fA-F]/);
+      else if (stream.eat("b")) stream.eatWhile(/[01]/);
+      else stream.eatWhile(/[0-7]/);
+      return "number";
+    } else if (/\d/.test(ch)) {
+      stream.match(/^[\d_]*(?:\.[\d_]+)?(?:[eE][+\-]?[\d_]+)?/);
+      return "number";
+    } else if (ch == "?") {
+      while (stream.match(/^\\[CM]-/)) {}
+      if (stream.eat("\\")) stream.eatWhile(/\w/);
+      else stream.next();
+      return "string";
+    } else if (ch == ":") {
+      if (stream.eat("'")) return chain(readQuoted("'", "atom", false), stream, state);
+      if (stream.eat('"')) return chain(readQuoted('"', "atom", true), stream, state);
 
-  function tokenString(openQuote, stream, state) {
-    var singleLine = openQuote.length == 1
-    var ch, escaped = false
-    while (ch = stream.peek()) {
-      if (escaped) {
-        stream.next()
-        if (ch == "(") {
-          state.tokenize.push(tokenUntilClosingParen())
-          return "string"
-        }
-        escaped = false
-      } else if (stream.match(openQuote)) {
-        state.tokenize.pop()
-        return "string"
+      // :> :>> :< :<< are valid symbols
+      if (stream.eat(/[\<\>]/)) {
+        stream.eat(/[\<\>]/);
+        return "atom";
+      }
+
+      // :+ :- :/ :* :| :& :! are valid symbols
+      if (stream.eat(/[\+\-\*\/\&\|\:\!]/)) {
+        return "atom";
+      }
+
+      // Symbols can't start by a digit
+      if (stream.eat(/[a-zA-Z$@_\xa1-\uffff]/)) {
+        stream.eatWhile(/[\w$\xa1-\uffff]/);
+        // Only one ? ! = is allowed and only as the last character
+        stream.eat(/[\?\!\=]/);
+        return "atom";
+      }
+      return "operator";
+    } else if (ch == "@" && stream.match(/^@?[a-zA-Z_\xa1-\uffff]/)) {
+      stream.eat("@");
+      stream.eatWhile(/[\w\xa1-\uffff]/);
+      return "variable-2";
+    } else if (ch == "$") {
+      if (stream.eat(/[a-zA-Z_]/)) {
+        stream.eatWhile(/[\w]/);
+      } else if (stream.eat(/\d/)) {
+        stream.eat(/\d/);
       } else {
-        stream.next()
-        escaped = ch == "\\"
+        stream.next(); // Must be a special global like $: or $!
+      }
+      return "variable-3";
+    } else if (/[a-zA-Z_\xa1-\uffff]/.test(ch)) {
+      stream.eatWhile(/[\w\xa1-\uffff]/);
+      stream.eat(/[\?\!]/);
+      if (stream.eat(":")) return "atom";
+      return "ident";
+    } else if (ch == "|" && (state.varList || state.lastTok == "{" || state.lastTok == "do")) {
+      curPunc = "|";
+      return null;
+    } else if (/[\(\)\[\]{}\\;]/.test(ch)) {
+      curPunc = ch;
+      return null;
+    } else if (ch == "-" && stream.eat(">")) {
+      return "arrow";
+    } else if (/[=+\-\/*:\.^%<>~|]/.test(ch)) {
+      var more = stream.eatWhile(/[=+\-\/*:\.^%<>~|]/);
+      if (ch == "." && !more) curPunc = ".";
+      return "operator";
+    } else {
+      return null;
+    }
+  }
+
+  function regexpAhead(stream) {
+    var start = stream.pos, depth = 0, next, found = false, escaped = false
+    while ((next = stream.next()) != null) {
+      if (!escaped) {
+        if ("[{(".indexOf(next) > -1) {
+          depth++
+        } else if ("]})".indexOf(next) > -1) {
+          depth--
+          if (depth < 0) break
+        } else if (next == "/" && depth == 0) {
+          found = true
+          break
+        }
+        escaped = next == "\\"
+      } else {
+        escaped = false
       }
     }
-    if (singleLine) {
-      state.tokenize.pop()
-    }
-    return "string"
+    stream.backUp(stream.pos - start)
+    return found
   }
 
-  function tokenComment(stream, state) {
-    var ch
-    while (true) {
-      stream.match(/^[^/*]+/, true)
-      ch = stream.next()
-      if (!ch) break
-      if (ch === "/" && stream.eat("*")) {
-        state.tokenize.push(tokenComment)
-      } else if (ch === "*" && stream.eat("/")) {
-        state.tokenize.pop()
+  function tokenBaseUntilBrace(depth) {
+    if (!depth) depth = 1;
+    return function(stream, state) {
+      if (stream.peek() == "}") {
+        if (depth == 1) {
+          state.tokenize.pop();
+          return state.tokenize[state.tokenize.length-1](stream, state);
+        } else {
+          state.tokenize[state.tokenize.length - 1] = tokenBaseUntilBrace(depth - 1);
+        }
+      } else if (stream.peek() == "{") {
+        state.tokenize[state.tokenize.length - 1] = tokenBaseUntilBrace(depth + 1);
       }
-    }
-    return "comment"
+      return tokenBase(stream, state);
+    };
   }
-
-  function Context(prev, align, indented) {
-    this.prev = prev
-    this.align = align
-    this.indented = indented
+  function tokenBaseOnce() {
+    var alreadyCalled = false;
+    return function(stream, state) {
+      if (alreadyCalled) {
+        state.tokenize.pop();
+        return state.tokenize[state.tokenize.length-1](stream, state);
+      }
+      alreadyCalled = true;
+      return tokenBase(stream, state);
+    };
   }
+  function readQuoted(quote, style, embed, unescaped) {
+    return function(stream, state) {
+      var escaped = false, ch;
 
-  function pushContext(state, stream) {
-    var align = stream.match(/^\s*($|\/[\/\*])/, false) ? null : stream.column() + 1
-    state.context = new Context(state.context, align, state.indented)
-  }
+      if (state.context.type === 'read-quoted-paused') {
+        state.context = state.context.prev;
+        stream.eat("}");
+      }
 
-  function popContext(state) {
-    if (state.context) {
-      state.indented = state.context.indented
-      state.context = state.context.prev
-    }
-  }
-
-  CodeMirror.defineMode("elixir", function(config) {
-    return {
-      startState: function() {
-        return {
-          prev: null,
-          context: null,
-          indented: 0,
-          tokenize: []
+      while ((ch = stream.next()) != null) {
+        if (ch == quote && (unescaped || !escaped)) {
+          state.tokenize.pop();
+          break;
         }
-      },
-
-      token: function(stream, state) {
-        var prev = state.prev
-        state.prev = null
-        var tokenize = state.tokenize[state.tokenize.length - 1] || tokenBase
-        var style = tokenize(stream, state, prev)
-        if (!style || style == "comment") state.prev = prev
-        else if (!state.prev) state.prev = style
-
-        if (style == "punctuation") {
-          var bracket = /[\(\[\{]|([\]\)\}])/.exec(stream.current())
-          if (bracket) (bracket[1] ? popContext : pushContext)(state, stream)
+        if (embed && ch == "#" && !escaped) {
+          if (stream.eat("{")) {
+            if (quote == "}") {
+              state.context = {prev: state.context, type: 'read-quoted-paused'};
+            }
+            state.tokenize.push(tokenBaseUntilBrace());
+            break;
+          } else if (/[@\$]/.test(stream.peek())) {
+            state.tokenize.push(tokenBaseOnce());
+            break;
+          }
         }
+        escaped = !escaped && ch == "\\";
+      }
+      return style;
+    };
+  }
+  function readHereDoc(phrase, mayIndent) {
+    return function(stream, state) {
+      if (mayIndent) stream.eatSpace()
+      if (stream.match(phrase)) state.tokenize.pop();
+      else stream.skipToEnd();
+      return "string";
+    };
+  }
+  function readBlockComment(stream, state) {
+    if (stream.sol() && stream.match("=end") && stream.eol())
+      state.tokenize.pop();
+    stream.skipToEnd();
+    return "comment";
+  }
 
-        return style
-      },
+  return {
+    startState: function() {
+      return {tokenize: [tokenBase],
+              indented: 0,
+              context: {type: "top", indented: -config.indentUnit},
+              continuedLine: false,
+              lastTok: null,
+              varList: false};
+    },
 
-      indent: function(state, textAfter) {
-        var cx = state.context
-        if (!cx) return 0
-        var closing = /^[\]\}\)]/.test(textAfter)
-        if (cx.align != null) return cx.align - (closing ? 1 : 0)
-        return cx.indented + (closing ? 0 : config.indentUnit)
-      },
+    token: function(stream, state) {
+      curPunc = null;
+      if (stream.sol()) state.indented = stream.indentation();
+      var style = state.tokenize[state.tokenize.length-1](stream, state), kwtype;
+      var thisTok = curPunc;
+      if (style == "ident") {
+        var word = stream.current();
+        style = state.lastTok == "." ? "property"
+          : keywords.propertyIsEnumerable(stream.current()) ? "keyword"
+          : /^[A-Z]/.test(word) ? "tag"
+          : (state.lastTok == "def" || state.lastTok == "class" || state.varList) ? "def"
+          : "variable";
+        if (style == "keyword") {
+          thisTok = word;
+          if (indentWords.propertyIsEnumerable(word)) kwtype = "indent";
+          else if (dedentWords.propertyIsEnumerable(word)) kwtype = "dedent";
+          else if ((word == "if" || word == "unless") && stream.column() == stream.indentation())
+            kwtype = "indent";
+          else if (word == "do" && state.context.indented < state.indented)
+            kwtype = "indent";
+        }
+      }
+      if (curPunc || (style && style != "comment")) state.lastTok = thisTok;
+      if (curPunc == "|") state.varList = !state.varList;
 
-      electricInput: /^\s*[\)\}\]]$/,
+      if (kwtype == "indent" || /[\(\[\{]/.test(curPunc))
+        state.context = {prev: state.context, type: curPunc || style, indented: state.indented};
+      else if ((kwtype == "dedent" || /[\)\]\}]/.test(curPunc)) && state.context.prev)
+        state.context = state.context.prev;
 
-      lineComment: "\#",
-      blockCommentStart: "\"\"\"",
-      blockCommentEnd: "\"\"\"",
-      fold: "brace",
-      closeBrackets: "()[]{}''\"\"``"
-    }
-  })
+      if (stream.eol())
+        state.continuedLine = (curPunc == "\\" || style == "operator");
+      return style;
+    },
 
-  CodeMirror.defineMIME("text/x-elixir","elixir")
+    indent: function(state, textAfter) {
+      if (state.tokenize[state.tokenize.length-1] != tokenBase) return CodeMirror.Pass;
+      var firstChar = textAfter && textAfter.charAt(0);
+      var ct = state.context;
+      var closed = ct.type == closing[firstChar] ||
+        ct.type == "keyword" && /^(?:end|until|else|elsif|when|rescue)\b/.test(textAfter);
+      return ct.indented + (closed ? 0 : config.indentUnit) +
+        (state.continuedLine ? config.indentUnit : 0);
+    },
+
+    electricInput: /^\s*(?:end|rescue|elsif|else|\})$/,
+    lineComment: "#",
+    fold: "indent"
+  };
+});
+
+CodeMirror.defineMIME("text/x-elixir", "elixir");
+
 });
